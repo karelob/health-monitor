@@ -1,0 +1,48 @@
+{
+  "output": "~/.config/health-monitor/system_pulse.json",
+  "log":    "~/.config/health-monitor/health_pulse.log",
+
+  "checks": [
+
+    {
+      "name": "my-api",
+      "type": "http_ping",
+      "interval": 300,
+      "url": "http://localhost:11434/api/tags",
+      "timeout": 6
+    },
+
+    {
+      "name": "my-process",
+      "type": "pid_alive",
+      "interval": 300,
+      "pidfile": "~/.run/myapp.pid"
+    },
+
+    {
+      "name": "my-service",
+      "type": "status_file",
+      "interval": 3600,
+      "path": "~/.myapp/last_run.json",
+      "max_age_h": 12
+    },
+
+    {
+      "name": "my-log",
+      "type": "log_fresh",
+      "interval": 1800,
+      "log": "~/logs/myapp.log",
+      "max_age_min": 90
+    },
+
+    {
+      "name": "my-log-pattern",
+      "type": "log_fresh",
+      "interval": 43200,
+      "log": "~/logs/backup.log",
+      "pattern": "B2.*OK",
+      "max_age_h": 168
+    }
+
+  ]
+}
