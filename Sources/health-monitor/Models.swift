@@ -23,10 +23,20 @@ struct CheckConfig: Decodable, Sendable {
     let pattern: String?    // optional regex: search last 8 KB for this pattern
     let maxAgeMin: Double?  // fail if log mtime older than N minutes
 
+    // ollama_chat: POST to Ollama /api/chat. Reuses `url` (chat endpoint),
+    // `timeout` (request timeout). Reads metrics from `metricsFrom` (path to
+    // system_pulse.json), passes summary to model, expects JSON reply with
+    // {"score":1-10,"trend":"...","anomalies":[...],"recommendations":[...]}.
+    let model: String?
+    let system: String?
+    let metricsFrom: String?  // path to system_pulse.json (or other JSON metrics source)
+
     enum CodingKeys: String, CodingKey {
         case name, type, interval, url, timeout, pidfile, path, log, pattern
+        case model, system
         case maxAgeH = "max_age_h"
         case maxAgeMin = "max_age_min"
+        case metricsFrom = "metrics_from"
     }
 }
 
@@ -41,15 +51,21 @@ struct AppConfig: Decodable {
 struct CheckResult: Codable, Sendable {
     let ok: Bool
     let checkedAt: Date
-    var latencyMs: Int?     // http_ping: round-trip ms
+    var latencyMs: Int?     // http_ping / ollama_chat: round-trip ms
     var pid: Int?           // pid_alive: pid read from pidfile
     var ageH: Double?       // status_file / log_fresh: hours since last update
     var ageMin: Double?     // log_fresh: minutes since last update
     var lastStatus: String? // status_file: value of "status" field in JSON
     var error: String?      // failure reason
 
+    // ollama_chat: parsed response fields
+    var score: Int?
+    var trend: String?
+    var anomalies: [String]?
+    var recommendations: [String]?
+
     enum CodingKeys: String, CodingKey {
-        case ok, error, pid
+        case ok, error, pid, score, trend, anomalies, recommendations
         case checkedAt = "checked_at"
         case latencyMs = "latency_ms"
         case ageH = "age_h"
@@ -64,7 +80,11 @@ struct CheckResult: Codable, Sendable {
         ageH: Double? = nil,
         ageMin: Double? = nil,
         lastStatus: String? = nil,
-        error: String? = nil
+        error: String? = nil,
+        score: Int? = nil,
+        trend: String? = nil,
+        anomalies: [String]? = nil,
+        recommendations: [String]? = nil
     ) {
         self.ok = ok
         self.checkedAt = Date()
@@ -74,6 +94,10 @@ struct CheckResult: Codable, Sendable {
         self.ageMin = ageMin
         self.lastStatus = lastStatus
         self.error = error
+        self.score = score
+        self.trend = trend
+        self.anomalies = anomalies
+        self.recommendations = recommendations
     }
 }
 

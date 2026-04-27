@@ -8,6 +8,7 @@ func runCheck(_ config: CheckConfig) async -> CheckResult {
     case "pid_alive":   return pidAlive(config)
     case "log_fresh":   return logFresh(config)
     case "status_file": return statusFile(config)
+    case "ollama_chat": return await ollamaChat(config)
     default:
         return CheckResult(ok: false, error: "unknown check type: \(config.type)")
     }
@@ -35,6 +36,154 @@ func httpPing(_ config: CheckConfig) async -> CheckResult {
         let ok = !data.isEmpty && statusCode < 400
         return CheckResult(ok: ok, latencyMs: latency,
                            error: ok ? nil : "HTTP \(statusCode)")
+    } catch {
+        return CheckResult(ok: false, error: error.localizedDescription)
+    }
+}
+
+// MARK: - ollama_chat
+
+// POSTs a chat completion to Ollama with a metrics summary built from the
+// JSON file at metrics_from. Expects model output to be a JSON object with
+// score/trend/anomalies/recommendations fields. Stores parsed fields on
+// CheckResult so consumers (e.g. NanoClaw background-monitor) can read the
+// last analysis directly from system_pulse.json.
+//
+// Why this lives here, not in NanoClaw: macOS Tahoe Local Network permission
+// is granted per-binary. /usr/bin/curl and this hardened-runtime Swift binary
+// have it; Homebrew node (adhoc-signed) does not from launchd context. So the
+// chat call needs a process that the kernel will let through.
+func ollamaChat(_ config: CheckConfig) async -> CheckResult {
+    guard let urlStr = config.url, let url = URL(string: urlStr) else {
+        return CheckResult(ok: false, error: "invalid or missing url")
+    }
+    guard let model = config.model else {
+        return CheckResult(ok: false, error: "ollama_chat requires `model`")
+    }
+
+    // Build user prompt from metrics file (best-effort — empty payload still ok).
+    // Strip self-key from metrics so the model doesn't hallucinate about its
+    // own previous result (e.g. "tier2_ollama is offline" because the snapshot
+    // it's reading still shows the prior failure).
+    var metricsSummary = "(no metrics source configured)"
+    if let mf = config.metricsFrom {
+        let mp = expandTilde(mf)
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: mp)) {
+            // Try to parse as JSON and remove our own check key from `checks`
+            if var parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               var checks = parsed["checks"] as? [String: Any] {
+                checks.removeValue(forKey: config.name)
+                parsed["checks"] = checks
+                if let cleaned = try? JSONSerialization.data(
+                    withJSONObject: parsed,
+                    options: [.prettyPrinted, .sortedKeys]),
+                   let s = String(data: cleaned, encoding: .utf8) {
+                    metricsSummary = s.count > 8192
+                        ? String(s.prefix(8192)) + "\n…(truncated)"
+                        : s
+                } else if let s = String(data: data, encoding: .utf8) {
+                    metricsSummary = s
+                }
+            } else if let s = String(data: data, encoding: .utf8) {
+                metricsSummary = s.count > 8192 ? String(s.prefix(8192)) + "\n…(truncated)" : s
+            }
+        } else {
+            metricsSummary = "(metrics file unreadable: \(mp))"
+        }
+    }
+
+    let userPrompt = """
+    SYSTEM_PULSE (latest snapshot, JSON):
+    \(metricsSummary)
+
+    Analyze. Output JSON only:
+    {"score":1-10,"trend":"improving|stable|degrading","anomalies":["..."],"recommendations":["..."]}
+    """
+
+    let systemPrompt = config.system ?? "You are a system health analyst. Output ONLY valid JSON, no explanation."
+
+    let body: [String: Any] = [
+        "model": model,
+        "messages": [
+            ["role": "system", "content": systemPrompt],
+            ["role": "user", "content": userPrompt]
+        ],
+        "think": false,
+        "stream": false
+    ]
+
+    guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
+        return CheckResult(ok: false, error: "failed to serialize request")
+    }
+
+    let timeoutSec = TimeInterval(config.timeout ?? 120)
+    let sessionCfg = URLSessionConfiguration.ephemeral
+    sessionCfg.timeoutIntervalForRequest = timeoutSec
+    sessionCfg.timeoutIntervalForResource = timeoutSec
+    let session = URLSession(configuration: sessionCfg)
+
+    var req = URLRequest(url: url)
+    req.httpMethod = "POST"
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.httpBody = payload
+
+    let start = Date()
+    do {
+        let (data, response) = try await session.data(for: req)
+        let latency = Int(Date().timeIntervalSince(start) * 1000)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if statusCode >= 400 {
+            return CheckResult(ok: false, latencyMs: latency, error: "HTTP \(statusCode)")
+        }
+
+        // Parse Ollama response envelope to extract assistant content
+        guard
+            let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let message = envelope["message"] as? [String: Any],
+            let content = message["content"] as? String
+        else {
+            return CheckResult(ok: false, latencyMs: latency, error: "malformed response envelope")
+        }
+
+        // Parse model JSON output (model may include surrounding text — best-effort
+        // extract first {...} block)
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let jsonStr: String
+        if let firstBrace = trimmed.firstIndex(of: "{"),
+           let lastBrace = trimmed.lastIndex(of: "}") {
+            jsonStr = String(trimmed[firstBrace...lastBrace])
+        } else {
+            return CheckResult(
+                ok: true, latencyMs: latency,
+                lastStatus: "no-json: \(trimmed.prefix(80))",
+                error: nil
+            )
+        }
+        guard
+            let parsed = try? JSONSerialization.jsonObject(with: Data(jsonStr.utf8)) as? [String: Any]
+        else {
+            return CheckResult(
+                ok: true, latencyMs: latency,
+                lastStatus: "parse-fail: \(jsonStr.prefix(80))",
+                error: nil
+            )
+        }
+
+        let score = parsed["score"] as? Int
+        let trend = parsed["trend"] as? String
+        let anomalies = parsed["anomalies"] as? [String]
+        let recommendations = parsed["recommendations"] as? [String]
+        let lastStatus: String? = score.map { "score=\($0)" + (trend.map { " trend=\($0)" } ?? "") }
+
+        return CheckResult(
+            ok: true,
+            latencyMs: latency,
+            lastStatus: lastStatus,
+            score: score,
+            trend: trend,
+            anomalies: anomalies,
+            recommendations: recommendations
+        )
     } catch {
         return CheckResult(ok: false, error: error.localizedDescription)
     }
