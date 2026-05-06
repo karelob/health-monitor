@@ -214,14 +214,18 @@ The top-level `checked_at` reflects the time of the most recent health-monitor i
 
 ## Transition log
 
-`health_pulse.log` is append-only. A line is written whenever a check flips state (ok → fail, fail → ok) or on first run:
+`health_pulse.log` is append-only. A line is written whenever a check flips state (ok → fail, fail → ok), on first run, or once per hour while a check stays DOWN (so the log doesn't go silent for hours during a long outage):
 
 ```
-2026-04-17T10:30:00Z [INIT] ollama: ok (42 ms)
-2026-04-17T11:05:00Z [DOWN] ollama (Connection refused)
-2026-04-17T11:30:00Z [UP  ] ollama (38 ms)
-2026-04-17T10:30:00Z [INIT] backup-b2: FAIL – log stale: 27h (max 25h)
+2026-04-17T10:30:00Z [INIT]  ollama: ok (42 ms)
+2026-04-17T11:05:00Z [DOWN]  ollama (Connection refused)
+2026-04-17T12:05:00Z [STILL] ollama (down 1.0h) (Connection refused)
+2026-04-17T13:05:00Z [STILL] ollama (down 2.0h) (Connection refused)
+2026-04-17T13:30:00Z [UP  ]  ollama (38 ms)
+2026-04-17T10:30:00Z [INIT]  backup-b2: FAIL – log stale: 27h (max 25h)
 ```
+
+`[STILL]` lines are emitted no more than once per hour per check. The interval is hard-coded in `Runner.swift` (`stillDownInterval`).
 
 ---
 

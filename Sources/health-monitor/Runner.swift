@@ -175,21 +175,60 @@ func runMain() async throws {
             }
         }
 
-        // Detect transitions and update state
+        // Detect transitions and update state. Persistent DOWN states get a
+        // periodic "STILL DOWN" log line every `stillDownInterval` seconds so
+        // the transitions log doesn't go silent for hours when something stays
+        // broken — tail of the log was misleading observers into thinking the
+        // monitor itself had stalled.
+        let stillDownInterval: TimeInterval = 3600
         for (name, result) in fresh {
-            if let prev = state[name]?.lastResult {
+            let prevState = state[name]
+            var downSince = prevState?.downSince
+            var lastDownLog = prevState?.lastDownLog
+
+            if let prev = prevState?.lastResult {
                 if prev.ok != result.ok {
                     let arrow = result.ok ? "UP  " : "DOWN"
                     let detail = result.ok
                         ? (result.latencyMs.map { " (\($0) ms)" } ?? "")
                         : (result.error.map { " (\($0))" } ?? "")
                     logTransition(to: logPath, message: "[\(arrow)] \(name)\(detail)")
+                    if result.ok {
+                        downSince = nil
+                        lastDownLog = nil
+                    } else {
+                        downSince = now
+                        lastDownLog = now
+                    }
+                } else if !result.ok {
+                    let lastLog = lastDownLog ?? downSince ?? prev.checkedAt
+                    if now.timeIntervalSince(lastLog) >= stillDownInterval {
+                        let downHours = (downSince ?? prev.checkedAt)
+                            .distance(to: now) / 3600.0
+                        let detail = result.error.map { " (\($0))" } ?? ""
+                        let durationFmt = String(format: "%.1fh", downHours)
+                        logTransition(
+                            to: logPath,
+                            message: "[STILL] \(name) (down \(durationFmt))\(detail)"
+                        )
+                        if downSince == nil { downSince = prev.checkedAt }
+                        lastDownLog = now
+                    }
                 }
             } else {
                 let status = result.ok ? "ok" : "FAIL\(result.error.map { " – \($0)" } ?? "")"
                 logTransition(to: logPath, message: "[INIT] \(name): \(status)")
+                if !result.ok {
+                    downSince = now
+                    lastDownLog = now
+                }
             }
-            state[name] = CheckState(lastRun: now, lastResult: result)
+            state[name] = CheckState(
+                lastRun: now,
+                lastResult: result,
+                downSince: downSince,
+                lastDownLog: lastDownLog
+            )
         }
     }
 

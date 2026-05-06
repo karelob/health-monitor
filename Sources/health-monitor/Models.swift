@@ -106,6 +106,22 @@ struct CheckResult: Codable, Sendable {
 struct CheckState: Codable {
     var lastRun: Date
     var lastResult: CheckResult
+    // Periodic-DOWN tracking. Both fields nil while ok; set when entering DOWN
+    // state, advanced on each periodic "STILL DOWN" log line.
+    var downSince: Date?
+    var lastDownLog: Date?
+
+    init(
+        lastRun: Date,
+        lastResult: CheckResult,
+        downSince: Date? = nil,
+        lastDownLog: Date? = nil
+    ) {
+        self.lastRun = lastRun
+        self.lastResult = lastResult
+        self.downSince = downSince
+        self.lastDownLog = lastDownLog
+    }
 }
 
 typealias PulseState = [String: CheckState]
