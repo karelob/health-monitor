@@ -18,27 +18,50 @@ func runCheck(_ config: CheckConfig) async -> CheckResult {
 
 // GETs the given URL and returns ok=true if the response is non-empty and HTTP < 400.
 // Measures round-trip latency in milliseconds.
+//
+// Retries transient failures (timeout / network unreachable) up to `retries`
+// times with exponential backoff (1s, 2s, 4s, ...). Default 2 retries → up to
+// 3 total attempts. HTTP 4xx/5xx responses are not retried — server replied,
+// it's not a transient issue.
 func httpPing(_ config: CheckConfig) async -> CheckResult {
     guard let urlStr = config.url, let url = URL(string: urlStr) else {
         return CheckResult(ok: false, error: "invalid or missing url")
     }
     let timeoutSec = TimeInterval(config.timeout ?? 6)
+    let maxRetries = max(0, config.retries ?? 2)
     let sessionCfg = URLSessionConfiguration.ephemeral
     sessionCfg.timeoutIntervalForRequest = timeoutSec
     sessionCfg.timeoutIntervalForResource = timeoutSec
     let session = URLSession(configuration: sessionCfg)
 
-    let start = Date()
-    do {
-        let (data, response) = try await session.data(from: url)
-        let latency = Int(Date().timeIntervalSince(start) * 1000)
-        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 200
-        let ok = !data.isEmpty && statusCode < 400
-        return CheckResult(ok: ok, latencyMs: latency,
-                           error: ok ? nil : "HTTP \(statusCode)")
-    } catch {
-        return CheckResult(ok: false, error: error.localizedDescription)
+    var lastError: String = "unknown"
+    let firstStart = Date()
+    for attempt in 0...maxRetries {
+        let start = Date()
+        do {
+            let (data, response) = try await session.data(from: url)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 200
+            let ok = !data.isEmpty && statusCode < 400
+            if ok || statusCode >= 400 {
+                // Success, or non-transient HTTP error — don't retry server replies
+                let totalLatency = Int(Date().timeIntervalSince(firstStart) * 1000)
+                let errSuffix = attempt > 0 ? " (after \(attempt) retries)" : ""
+                return CheckResult(
+                    ok: ok,
+                    latencyMs: ok ? totalLatency : latency,
+                    error: ok ? nil : "HTTP \(statusCode)\(errSuffix)"
+                )
+            }
+        } catch {
+            lastError = error.localizedDescription
+        }
+        if attempt < maxRetries {
+            let backoffNs = UInt64(pow(2.0, Double(attempt)) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: backoffNs)
+        }
     }
+    return CheckResult(ok: false, error: "\(lastError) (after \(maxRetries) retries)")
 }
 
 // MARK: - ollama_chat

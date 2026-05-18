@@ -10,6 +10,7 @@ struct CheckConfig: Decodable, Sendable {
     // http_ping
     let url: String?
     let timeout: Int?       // connect + read timeout in seconds (default 6)
+    let retries: Int?       // retry attempts on transient failure (default 2 → up to 3 total attempts)
 
     // pid_alive
     let pidfile: String?
@@ -32,7 +33,7 @@ struct CheckConfig: Decodable, Sendable {
     let metricsFrom: String?  // path to system_pulse.json (or other JSON metrics source)
 
     enum CodingKeys: String, CodingKey {
-        case name, type, interval, url, timeout, pidfile, path, log, pattern
+        case name, type, interval, url, timeout, retries, pidfile, path, log, pattern
         case model, system
         case maxAgeH = "max_age_h"
         case maxAgeMin = "max_age_min"
